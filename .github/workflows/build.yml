@@ -40,10 +40,11 @@ jobs:
         run: |
           brew install xcodegen
           xcodegen generate
-          xcodebuild -project NarrativeClone.xcodeproj -scheme NarrativeClone -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project NarrativeClone.xcodeproj -scheme NarrativeClone -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
           mkdir -p Payload
-          cp -r ~/Library/Developer/Xcode/DerivedData/*/Build/Products/Release-iphoneos/NarrativeClone.app Payload/
-          zip -r Narrative.ipa Payload
+          cp -r build/Build/Products/Release-iphoneos/NarrativeClone.app Payload/
+          zip -ry Narrative.ipa Payload
+          ls -lh Narrative.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
