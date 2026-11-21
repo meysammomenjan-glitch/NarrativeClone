@@ -34,6 +34,7 @@ jobs:
                   UILaunchScreen: {}
                   NSPhotoLibraryUsageDescription: "Import videos and reference images to edit with AI"
                   NSPhotoLibraryAddUsageDescription: "Save edited videos to Camera Roll"
+                  NSSpeechRecognitionUsageDescription: "Generate automatic captions from video audio"
           EOF
 
       - name: Generate & Build IPA
