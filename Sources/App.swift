@@ -55,7 +55,8 @@ class NarrativeEngine {
         return await withCheckedContinuation { c in
             rec.recognitionTask(with: req) { res, err in
                 guard let res = res, res.isFinal else { if err != nil { c.resume(returning: "") }; return }
-                c.resume(returning: res.bestTranscription.segments.map { "[\($0.timestamp)s:\($0.substring)]" }.joined(separator: " "))
+                let items = res.bestTranscription.segments.map { "[" + String(Int($0.timestamp)) + "s:" + $0.substring + "]" }
+                c.resume(returning: items.joined(separator: " "))
             }
         }
     }
@@ -83,15 +84,12 @@ class NarrativeEngine {
     
     func edit(prompt: String, mode: AIMode, durs: [Double], speech: [String], ref: UIImage?, cur: TimelineProject?, key: String) async throws -> TimelineProject {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        var req = URLRequest(url: URL(string: "https://googleapis.com\(mode.model):generateContent?key=\(k)")!)
+        let endpoint = "https://googleapis.com" + mode.model + ":generateContent?key=" + k
+        var req = URLRequest(url: URL(string: endpoint)!)
         req.httpMethod = "POST"; req.addValue("application/json", forHTTPHeaderField: "Content-Type")
         let curStr = (try? String(data: JSONEncoder().encode(cur), encoding: .utf8)) ?? "None"
-        let info = durs.enumerated().map { "Clip \($0.offset) (\($0.element)s) Speech: \(speech[$0.offset])" }.joined(separator: "\n")
-        let sys = """
-        You are Narrative AI video editor. Match reference images, search spoken words, cut clips, and add titles/captions. Output ONLY valid JSON:
-        {"aspect_ratio":"9:16","clips":[{"clip_index":0,"start_seconds":0.0,"end_seconds":5.0,"speed":1.0,"label":"Hook"}],"overlays":[{"text":"Title","start_seconds":0.0,"end_seconds":2.0,"position":"center"}],"auto_captions":true,"assistant_reply":"Done"}
-        Clips:\n\(info)\nCurrent:\n\(curStr)\nRequest:\(prompt)
-        """
+        let info = durs.enumerated().map { "Clip " + String($0.offset) + " (" + String(Int($0.element)) + "s) Speech: " + speech[$0.offset] }.joined(separator: "\n")
+        let sys = "You are Narrative AI video editor. Match reference images, search spoken words, cut clips, and add titles/captions. Output ONLY valid JSON: {\"aspect_ratio\":\"9:16\",\"clips\":[{\"clip_index\":0,\"start_seconds\":0.0,\"end_seconds\":5.0,\"speed\":1.0,\"label\":\"Hook\"}],\"overlays\":[{\"text\":\"Title\",\"start_seconds\":0.0,\"end_seconds\":2.0,\"position\":\"center\"}],\"auto_captions\":true,\"assistant_reply\":\"Done\"}\nClips:\n" + info + "\nCurrent:\n" + curStr + "\nRequest:" + prompt
         var parts: [[String: Any]] = [["text": sys]]
         if let d = ref?.jpegData(compressionQuality: 0.6) {
             parts.append(["inline_data": ["mime_type": "image/jpeg", "data": d.base64EncodedString()]])
@@ -138,7 +136,7 @@ class NarrativeEngine {
             t.add(show, forKey: "s"); t.add(hide, forKey: "h"); parent.addSublayer(t)
         }
         vComp.animationTool = AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: vLayer, in: parent)
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("out_\(UUID().uuidString).mp4")
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("out_" + UUID().uuidString + ".mp4")
         guard let exp = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else { throw NSError(domain: "N", code: 2) }
         exp.outputURL = out; exp.outputFileType = .mp4; exp.videoComposition = vComp; await exp.export()
         return out
@@ -151,9 +149,8 @@ struct ContentView: View {
     @State private var refImg: UIImage?
     @State private var urls: [URL] = [], durs: [Double] = [], speeches: [String] = []
     @State private var versions: [TimelineProject] = [], idx = -1, preview: URL?
-    @State private var mode: AIMode = .balanced, prompt = "", busy = false, status = "Import clips, show a photo or explain your edit."
-    @AppStorage("gemini_api_key") private var apiKey = ""
-Use code with caution.
+@State private var mode: AIMode = .balanced, prompt = "", busy = false, status = "Import clips, show a photo or explain your edit."
+@AppStorage("gemini_api_key") private var apiKey = ""
 @State private var showKey = false
 let engine = NarrativeEngine()
 var body: some View {
@@ -176,12 +173,19 @@ else { VStack { Image(systemName: "sparkles.tv").font(.largeTitle).foregroundCol
 }.frame(height: 245)
 if !versions.isEmpty {
 ScrollView(.horizontal, showsIndicators: false) {
-HStack { ForEach(versions.indices, id: .self) { i in Button("v(i+1)") { idx = i; Task { preview = try? await engine.render(urls: urls, proj: versions[i]) } }.font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 5).background(idx == i ? Color.purple : Color.white.opacity(0.1)).foregroundColor(.white).clipShape(Capsule()) } }
+HStack { ForEach(versions.indices, id: .self) { i in Button("v" + String(i + 1)) { idx = i; Task { preview = try? await engine.render(urls: urls, proj: versions[i]) } }.font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 5).background(idx == i ? Color.purple : Color.white.opacity(0.1)).foregroundColor(.white).clipShape(Capsule()) } }
 }
 }
 if idx >= 0 && idx < versions.count {
 ScrollView(.horizontal, showsIndicators: false) {
-HStack { ForEach(versions[idx].clips) { c in VStack(alignment: .leading) { Text(c.label ?? "Clip (c.clip_index+1)").font(.caption2.bold()); Text("(c.start_seconds, specifier: "%.1f")s-(c.end_seconds, specifier: "%.1f")s ((c.speed, specifier: "%.1f")x)").font(.caption2) }.padding(8).background(Color.purple.opacity(0.35)).cornerRadius(8) } }
+HStack {
+ForEach(versions[idx].clips) { c in
+VStack(alignment: .leading) {
+Text(c.label ?? ("Clip " + String(c.clip_index + 1))).font(.caption2.bold())
+Text(String(Int(c.start_seconds)) + "s-" + String(Int(c.end_seconds)) + "s (" + String(c.speed) + "x)").font(.caption2)
+}.padding(8).background(Color.purple.opacity(0.35)).cornerRadius(8)
+}
+}
 }
 }
 Text(status).font(.caption).padding(10).frame(maxWidth: .infinity, alignment: .leading).background(Color.white.opacity(0.07)).cornerRadius(10)
@@ -205,20 +209,20 @@ func load( list: [PhotosPickerItem]) async {
 urls.removeAll(); durs.removeAll(); speeches.removeAll(); status = "Indexing clips & speech..."
 for (i, it) in list.enumerated() {
 if let d = try? await it.loadTransferable(type: Data.self) {
-let u = FileManager.default.temporaryDirectory.appendingPathComponent("s(i).mov"); try? d.write(to: u)
+let u = FileManager.default.temporaryDirectory.appendingPathComponent("s" + String(i) + ".mov"); try? d.write(to: u)
 let dur = (try? await AVURLAsset(url: u).load(.duration).seconds) ?? 5.0
 urls.append(u); durs.append(dur); speeches.append(await engine.transcribe(url: u))
 }
 }
-status = "Loaded (urls.count) clip(s). Show an image or explain your edit!"
+status = "Loaded " + String(urls.count) + " clip(s). Show an image or explain your edit!"
 }
 func run() async {
 guard !apiKey.isEmpty else { showKey = true; return }
-busy = true; let p = prompt.isEmpty ? "Match reference image style" : prompt; prompt = ""; status = "Editing ((mode.rawValue))..."
+busy = true; let p = prompt.isEmpty ? "Match reference image style" : prompt; prompt = ""; status = "Editing (" + mode.rawValue + ")..."
 do {
 let proj = try await engine.edit(prompt: p, mode: mode, durs: durs, speech: speeches, ref: refImg, cur: idx >= 0 ? versions[idx] : nil, key: apiKey)
 versions.append(proj); idx = versions.count - 1; status = proj.assistant_reply ?? "Updated!"; preview = try? await engine.render(urls: urls, proj: proj)
-} catch { status = "Error: (error.localizedDescription)" }
+} catch { status = "Error: " + error.localizedDescription }
 busy = false
 }
 }
