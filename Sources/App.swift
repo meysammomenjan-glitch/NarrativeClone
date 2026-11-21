@@ -190,7 +190,7 @@ struct ContentView: View {
                             ForEach(versions[idx].clips) { c in
                                 VStack(alignment: .leading) {
                                     Text(c.label ?? ("Clip " + String(c.clip_index + 1))).font(.caption2.bold())
-                                    Text(String(Int(c.start_seconds)) + "s-" + String(Int(c.end_seconds)) + "s (" + String(c.speed) + "x)").font(.caption2)
+                                    Text(verbatim: [String(Int(c.start_seconds)), "s-", String(Int(c.end_seconds)), "s (", String(c.speed), "x)"].joined()).font(.caption2)
                                 }.padding(8).background(Color.purple.opacity(0.35)).cornerRadius(8)
                             }
                         }
