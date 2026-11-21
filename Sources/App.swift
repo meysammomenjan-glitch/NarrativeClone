@@ -1,8 +1,6 @@
 import SwiftUI
-import PhotosUI
 import AVKit
 import AVFoundation
-import Speech
 import Photos
 import UIKit
 import UniformTypeIdentifiers
@@ -15,20 +13,50 @@ struct NarrativeApp: App {
 }
 
 enum AIMode: String, CaseIterable {
-    case fast = "Fast", balanced = "Balanced", max = "Max"
-    var model: String { self == .max ? "gemini-2.5-pro" : "gemini-2.5-flash" }
+    case fast = "Fast"
+    case balanced = "Balanced"
+    case max = "Max"
+    
+    var model: String {
+        switch self {
+        case .fast, .balanced: return "gemini-2.5-flash"
+        case .max: return "gemini-2.5-pro"
+        }
+    }
 }
 
-struct MovieFile: Transferable {
-    let url: URL
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { file in
-            SentTransferredFile(file.url)
-        } importing: { received in
-            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
-            try FileManager.default.copyItem(at: received.file, to: copy)
-            return Self(url: copy)
+struct NativeMediaPicker: UIViewControllerRepresentable {
+    var isVideo: Bool
+    var onPickVideo: ((URL) -> Void)?
+    var onPickImage: ((UIImage) -> Void)?
+    @Environment(\.dismiss) private var dismiss
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .photoLibrary
+        picker.mediaTypes = isVideo ? [UTType.movie.identifier] : [UTType.image.identifier]
+        picker.videoExportPreset = AVAssetExportPresetPassthrough
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    
+    class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let parent: NativeMediaPicker
+        init(_ parent: NativeMediaPicker) { self.parent = parent }
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+            if parent.isVideo, let srcURL = info[.mediaURL] as? URL {
+                let dest = FileManager.default.temporaryDirectory.appendingPathComponent("clip_" + UUID().uuidString + ".mov")
+                try? FileManager.default.copyItem(at: srcURL, to: dest)
+                parent.onPickVideo?(dest)
+            } else if !parent.isVideo, let img = info[.originalImage] as? UIImage {
+                parent.onPickImage?(img)
+            }
+            parent.dismiss()
         }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
     }
 }
 
@@ -37,9 +65,8 @@ struct TimelineProject: Codable, Identifiable {
     var aspect_ratio: String
     var clips: [TimelineClip]
     var overlays: [TextOverlay]
-    var auto_captions: Bool
     var assistant_reply: String?
-    enum CodingKeys: String, CodingKey { case aspect_ratio, clips, overlays, auto_captions, assistant_reply }
+    enum CodingKeys: String, CodingKey { case aspect_ratio, clips, overlays, assistant_reply }
 }
 
 struct TimelineClip: Codable, Identifiable {
@@ -62,42 +89,15 @@ struct TextOverlay: Codable, Identifiable {
 }
 
 class NarrativeEngine {
-    func transcribe(url: URL) async -> [TextOverlay] {
-        let auth = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
-        guard auth == .authorized, let rec = SFSpeechRecognizer(), rec.isAvailable else { return [] }
-        let req = SFSpeechURLRecognitionRequest(url: url); req.shouldReportPartialResults = false
-        return await withCheckedContinuation { c in
-            rec.recognitionTask(with: req) { res, err in
-                guard let res = res, res.isFinal else { if err != nil { c.resume(returning: []) }; return }
-                var list: [TextOverlay] = [], words: [String] = [], start = 0.0
-                for s in res.bestTranscription.segments {
-                    if words.isEmpty { start = s.timestamp }
-                    words.append(s.substring)
-                    if words.count >= 3 {
-                        list.append(TextOverlay(text: words.joined(separator: " "), start_seconds: start, end_seconds: s.timestamp + s.duration, position: "bottom"))
-                        words.removeAll()
-                    }
-                }
-                if !words.isEmpty, let last = res.bestTranscription.segments.last {
-                    list.append(TextOverlay(text: words.joined(separator: " "), start_seconds: start, end_seconds: last.timestamp + last.duration, position: "bottom"))
-                }
-                c.resume(returning: list)
-            }
-        }
-    }
-    
-    func edit(prompt: String, mode: AIMode, aspect: String, durs: [Double], transcripts: [String], ref: UIImage?, cur: TimelineProject?, key: String) async throws -> TimelineProject {
+    func edit(prompt: String, mode: AIMode, aspect: String, durs: [Double], ref: UIImage?, cur: TimelineProject?, key: String) async throws -> TimelineProject {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let endpoint = "https://googleapis.com" + mode.model + ":generateContent?key=" + k
         var req = URLRequest(url: URL(string: endpoint)!)
         req.httpMethod = "POST"
         req.addValue("application/json", forHTTPHeaderField: "Content-Type")
         let curStr = (try? String(data: JSONEncoder().encode(cur), encoding: .utf8)) ?? "None"
-        let info = durs.enumerated().map { idx, d in
-            let sp = idx < transcripts.count && !transcripts[idx].isEmpty ? " | Spoken words: " + transcripts[idx] : ""
-            return "Clip " + String(idx) + " (" + String(Int(d)) + "s)" + sp
-        }.joined(separator: "\n")
-        let sys = "You are Narrative, an AI-first video editor. Cut the user's footage based on their prompt, spoken dialogue, and any reference image. Only create overlays from real spoken words or titles requested by the user. Target aspect ratio: " + aspect + ". Output ONLY valid JSON: {\"aspect_ratio\":\"" + aspect + "\",\"clips\":[{\"clip_index\":0,\"start_seconds\":0.0,\"end_seconds\":4.0,\"speed\":1.0,\"label\":\"Clip 1\"}],\"overlays\":[],\"auto_captions\":true,\"assistant_reply\":\"Summary of edits\"}\nFootage:\n" + info + "\nCurrent Timeline:\n" + curStr + "\nUser Request: " + prompt
+        let info = durs.enumerated().map { "Clip " + String($0.offset) + " (" + String(Int($0.element)) + "s)" }.joined(separator: ", ")
+        let sys = "You are Gemini directing Narrative, an AI-first mobile video editor. Match any attached reference image style, cut tight rhythmic edits from the user's clips, adjust speeds, and create short bold text overlays/captions matching the user's request. Aspect ratio: " + aspect + ". Output ONLY valid JSON: {\"aspect_ratio\":\"" + aspect + "\",\"clips\":[{\"clip_index\":0,\"start_seconds\":0.0,\"end_seconds\":3.5,\"speed\":1.0,\"label\":\"Hook\"}],\"overlays\":[{\"text\":\"TITLE\",\"start_seconds\":0.0,\"end_seconds\":2.0,\"position\":\"bottom\"}],\"assistant_reply\":\"Done\"}\nClips: " + info + "\nCurrent Timeline: " + curStr + "\nUser Prompt: " + prompt
         var parts: [[String: Any]] = [["text": sys]]
         if let d = ref?.jpegData(compressionQuality: 0.6) {
             parts.append(["inline_data": ["mime_type": "image/jpeg", "data": d.base64EncodedString()]])
@@ -105,7 +105,7 @@ class NarrativeEngine {
         req.httpBody = try JSONSerialization.data(withJSONObject: ["contents": [["parts": parts]], "generationConfig": ["responseMimeType": "application/json"]])
         let (data, _) = try await URLSession.shared.data(for: req)
         let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        if let err = (raw?["error"] as? [String: Any])?["message"] as? String { throw NSError(domain: "AI", code: 400, userInfo: [NSLocalizedDescriptionKey: err]) }
+        if let err = (raw?["error"] as? [String: Any])?["message"] as? String { throw NSError(domain: "Gemini", code: 400, userInfo: [NSLocalizedDescriptionKey: err]) }
         let txt = (((raw?["candidates"] as? [[String: Any]])?.first?["content"] as? [String: Any])?["parts"] as? [[String: Any]])?.first?["text"] as? String ?? "{}"
         return try JSONDecoder().decode(TimelineProject.self, from: Data(txt.utf8))
     }
@@ -155,12 +155,9 @@ class NarrativeEngine {
 struct ContentView: View {
     @State private var showVideoPicker = false
     @State private var showRefPicker = false
-    @State private var items: [PhotosPickerItem] = []
-    @State private var refItem: PhotosPickerItem?
     @State private var refImg: UIImage?
     @State private var urls: [URL] = []
     @State private var durs: [Double] = []
-    @State private var transcripts: [String] = []
     @State private var versions: [TimelineProject] = []
     @State private var idx = -1
     @State private var preview: URL?
@@ -170,7 +167,7 @@ struct ContentView: View {
     @State private var mode: AIMode = .balanced
     @State private var prompt = ""
     @State private var busy = false
-    @State private var status = "Bring your footage, say what you want made"
+    @State private var status = "Bring your footage, ask Gemini what to make"
     @AppStorage("gemini_api_key") private var apiKey = ""
     @State private var showKey = false
     let engine = NarrativeEngine()
@@ -183,9 +180,9 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     Button { showKey = true } label: {
-                        Image(systemName: apiKey.isEmpty ? "key.fill" : "xmark")
+                        Image(systemName: apiKey.isEmpty ? "key.fill" : "sparkles")
                             .font(.subheadline.bold())
-                            .foregroundColor(apiKey.isEmpty ? .orange : .white)
+                            .foregroundColor(apiKey.isEmpty ? .orange : Color(red: 0.43, green: 0.34, blue: 0.96))
                     }
                     Menu {
                         ForEach(AIMode.allCases, id: \.self) { m in Button(m.rawValue) { mode = m } }
@@ -252,7 +249,7 @@ struct ContentView: View {
                         Image(systemName: isPlaying ? "pause.fill" : "play.fill").font(.body).foregroundColor(.white)
                     }
                     Spacer()
-                    Text(idx >= 0 ? "Version " + String(idx + 1) : status).font(.caption2).foregroundColor(.gray).lineLimit(1)
+                    Text(idx >= 0 ? "v" + String(idx + 1) + " • " + status : status).font(.caption2).foregroundColor(.gray).lineLimit(1)
                     Spacer()
                     HStack(spacing: 14) {
                         Button { if idx > 0 { idx -= 1; Task { await loadPreview(versions[idx]) } } } label: { Image(systemName: "arrow.uturn.backward").font(.caption).foregroundColor(idx > 0 ? .white : .gray) }
@@ -317,7 +314,7 @@ struct ContentView: View {
                         Image(systemName: refImg == nil ? "photo.badge.plus" : "checkmark.circle.fill")
                             .font(.title3).foregroundColor(Color(red: 0.43, green: 0.34, blue: 0.96))
                     }
-                    TextField("Say what you want made...", text: $prompt)
+                    TextField("Tell Gemini what to edit...", text: $prompt)
                         .font(.subheadline).padding(9).background(Color.white.opacity(0.1)).cornerRadius(18)
                     Button { Task { await run() } } label: {
                         if busy { ProgressView().tint(.white) }
@@ -326,29 +323,30 @@ struct ContentView: View {
                 }.padding(.horizontal).padding(.bottom, 6)
             }
         }
-photosPicker(isPresented: $showVideoPicker, selection: $items, maxSelectionCount: 8, matching: .videos, preferredItemEncoding: .compatible)
-.photosPicker(isPresented: $showRefPicker, selection: $refItem, matching: .images)
-.onChange(of: items) { _, list in Task { await load(list) } }
-.onChange(of: refItem) { _, it in Task { if let d = try? await it?.loadTransferable(type: Data.self) { refImg = UIImage(data: d) } } }
+        .sheet(isPresented: $showVideoPicker) {
+NativeMediaPicker(isVideo: true, onPickVideo: { u in Task { await addClip(u) } })
+}
+.sheet(isPresented: $showRefPicker) {
+NativeMediaPicker(isVideo: false, onPickImage: { img in refImg = img })
+}
 .sheet(isPresented: $showKey) {
-NavigationStack { Form { SecureField("Free Gemini API Key (AIza...)", text: $apiKey) }.navigationTitle("AI Settings").toolbar { Button("Done") { showKey = false } } }.presentationDetents([.medium])
+NavigationStack {
+Form {
+Section("Connect Gemini AI") {
+SecureField("Paste AIza... key", text: $apiKey)
+Text("Get your free key at google.com").font(.caption).foregroundColor(.secondary)
 }
 }
-@MainActor func load(_ list: [PhotosPickerItem]) async {
-guard !list.isEmpty else { return }
-urls.removeAll(); durs.removeAll(); transcripts.removeAll(); status = "Importing clips..."
-for it in list {
-if let movie = try? await it.loadTransferable(type: MovieFile.self) {
-let u = movie.url
+.navigationTitle("Gemini Settings")
+.toolbar { Button("Done") { showKey = false } }
+}.presentationDetents([.medium])
+}
+}
+@MainActor func addClip(_ u: URL) async {
 let dur = (try? await AVURLAsset(url: u).load(.duration).seconds) ?? 5.0
-let words = await engine.transcribe(url: u)
-let spoken = words.map { $0.text }.joined(separator: " ")
-urls.append(u); durs.append(dur); transcripts.append(spoken)
-}
-}
-items.removeAll()
-if let first = urls.first { player = AVPlayer(url: first) }
-status = "Imported " + String(urls.count) + " clip(s)"
+urls.append(u); durs.append(dur)
+if urls.count == 1 { player = AVPlayer(url: u) }
+status = "Added Clip " + String(urls.count) + " (" + String(Int(dur)) + "s)"
 }
 @MainActor func loadPreview(_ proj: TimelineProject) async {
 if let out = try? await engine.render(urls: urls, proj: proj, fallbackAspect: aspect) {
@@ -357,12 +355,9 @@ preview = out; player = AVPlayer(url: out); player.play(); isPlaying = true
 }
 @MainActor func run() async {
 guard !apiKey.isEmpty else { showKey = true; return }
-busy = true; let p = prompt.isEmpty ? "Match reference image style" : prompt; prompt = ""; status = "Cutting (" + mode.rawValue + ")..."
+busy = true; let p = prompt.isEmpty ? "Match reference image style" : prompt; prompt = ""; status = "Gemini (" + mode.rawValue + ") is cutting..."
 do {
-var proj = try await engine.edit(prompt: p, mode: mode, aspect: aspect, durs: durs, transcripts: transcripts, ref: refImg, cur: idx >= 0 ? versions[idx] : nil, key: apiKey)
-if proj.auto_captions && proj.overlays.isEmpty, let first = urls.first {
-proj.overlays = await engine.transcribe(url: first)
-}
+let proj = try await engine.edit(prompt: p, mode: mode, aspect: aspect, durs: durs, ref: refImg, cur: idx >= 0 ? versions[idx] : nil, key: apiKey)
 versions.append(proj); idx = versions.count - 1; status = proj.assistant_reply ?? "Done!"
 await loadPreview(proj)
 } catch { status = "Error: " + error.localizedDescription }
