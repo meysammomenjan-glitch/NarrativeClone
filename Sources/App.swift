@@ -147,9 +147,16 @@ struct ContentView: View {
     @State private var items: [PhotosPickerItem] = []
     @State private var refItem: PhotosPickerItem?
     @State private var refImg: UIImage?
-    @State private var urls: [URL] = [], durs: [Double] = [], speeches: [String] = []
-    @State private var versions: [TimelineProject] = [], idx = -1, preview: URL?
-    @State private var mode: AIMode = .balanced, prompt = "", busy = false, status = "Import clips, show a photo or explain your edit."
+    @State private var urls: [URL] = []
+    @State private var durs: [Double] = []
+    @State private var speeches: [String] = []
+    @State private var versions: [TimelineProject] = []
+    @State private var idx = -1
+    @State private var preview: URL?
+    @State private var mode: AIMode = .balanced
+    @State private var prompt = ""
+    @State private var busy = false
+    @State private var status = "Import clips, show a photo or explain your edit."
     @AppStorage("gemini_api_key") private var apiKey = ""
     @State private var showKey = false
     let engine = NarrativeEngine()
@@ -227,3 +234,5 @@ struct ContentView: View {
         busy = false
     }
 }
+
+
