@@ -32,9 +32,8 @@ jobs:
                   CFBundleShortVersionString: "1.0"
                   CFBundleVersion: "1"
                   UILaunchScreen: {}
-                  NSPhotoLibraryUsageDescription: "Import videos and reference images to edit with AI"
+                  NSPhotoLibraryUsageDescription: "Import videos and reference images to edit with Gemini AI"
                   NSPhotoLibraryAddUsageDescription: "Save edited videos to Camera Roll"
-                  NSSpeechRecognitionUsageDescription: "Generate automatic captions from video audio"
           EOF
 
       - name: Generate & Build IPA
