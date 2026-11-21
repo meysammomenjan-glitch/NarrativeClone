@@ -27,10 +27,13 @@ jobs:
                 path: Sources/Info.plist
                 properties:
                   CFBundleDisplayName: Narrative
+                  CFBundleExecutable: $(EXECUTABLE_NAME)
+                  CFBundlePackageType: APPL
+                  CFBundleShortVersionString: "1.0"
+                  CFBundleVersion: "1"
                   UILaunchScreen: {}
                   NSPhotoLibraryUsageDescription: "Import videos and reference images to edit with AI"
                   NSPhotoLibraryAddUsageDescription: "Save edited videos to Camera Roll"
-                  NSSpeechRecognitionUsageDescription: "Generate automatic captions from video audio"
           EOF
 
       - name: Generate & Build IPA
