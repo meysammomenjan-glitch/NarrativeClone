@@ -43,8 +43,7 @@ jobs:
           xcodebuild -project NarrativeClone.xcodeproj -scheme NarrativeClone -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/NarrativeClone.app Payload/
-          zip -ry Narrative.ipa Payload
-          ls -lh Narrative.ipa
+          ditto -c -k --sequesterRsrc --keepParent Payload Narrative.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
