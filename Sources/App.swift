@@ -198,8 +198,8 @@ TextField("Show style or explain edit...", text: $prompt).textFieldStyle(.rounde
 Button { Task { await run() } } label: { busy ? AnyView(ProgressView()) : AnyView(Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundColor(.purple)) }.disabled(urls.isEmpty || (prompt.isEmpty && refImg == nil) || busy)
 }
 }.padding().navigationTitle("Narrative").navigationBarTitleDisplayMode(.inline)
-.onChange(of: items) { , list in Task { await load(list) } }
-.onChange(of: refItem) { , it in Task { if let d = try? await it?.loadTransferable(type: Data.self) { refImg = UIImage(data: d) } } }
+.onChange(of: items) { _, list in Task { await load(list) } }
+.onChange(of: refItem) { _, it in Task { if let d = try? await it?.loadTransferable(type: Data.self) { refImg = UIImage(data: d) } } }
 .sheet(isPresented: $showKey) {
 NavigationStack { Form { SecureField("Free Gemini API Key (AIza...)", text: $apiKey) }.navigationTitle("AI Key").toolbar { Button("Done") { showKey = false } } }.presentationDetents([.medium])
 }
