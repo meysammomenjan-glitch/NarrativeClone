@@ -1,0 +1,52 @@
+### 2. Name this file: `.github/workflows/build.yml`
+
+```yaml
+name: Build Narrative IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create XcodeGen Config
+        run: |
+          cat << 'EOF' > project.yml
+          name: NarrativeClone
+          options:
+            bundleIdPrefix: com.custom
+          targets:
+            NarrativeClone:
+              type: application
+              platform: iOS
+              deploymentTarget: "17.0"
+              sources: [Sources]
+              info:
+                path: Sources/Info.plist
+                properties:
+                  CFBundleDisplayName: Narrative
+                  UILaunchScreen: {}
+                  NSPhotoLibraryUsageDescription: "Import videos and reference images to edit with AI"
+                  NSPhotoLibraryAddUsageDescription: "Save edited videos to Camera Roll"
+                  NSSpeechRecognitionUsageDescription: "Generate automatic captions from video audio"
+          EOF
+
+      - name: Generate & Build IPA
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project NarrativeClone.xcodeproj -scheme NarrativeClone -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO build
+          mkdir -p Payload
+          cp -r ~/Library/Developer/Xcode/DerivedData/*/Build/Products/Release-iphoneos/NarrativeClone.app Payload/
+          zip -r Narrative.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Narrative-IPA
+          path: Narrative.ipa
