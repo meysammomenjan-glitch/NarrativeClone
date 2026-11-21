@@ -2,8 +2,10 @@ import SwiftUI
 import PhotosUI
 import AVKit
 import AVFoundation
+import Speech
 import Photos
 import UIKit
+import UniformTypeIdentifiers
 
 @main
 struct NarrativeApp: App {
@@ -15,6 +17,19 @@ struct NarrativeApp: App {
 enum AIMode: String, CaseIterable {
     case fast = "Fast", balanced = "Balanced", max = "Max"
     var model: String { self == .max ? "gemini-2.5-pro" : "gemini-2.5-flash" }
+}
+
+struct MovieFile: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { file in
+            SentTransferredFile(file.url)
+        } importing: { received in
+            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return Self(url: copy)
+        }
+    }
 }
 
 struct TimelineProject: Codable, Identifiable {
@@ -47,15 +62,42 @@ struct TextOverlay: Codable, Identifiable {
 }
 
 class NarrativeEngine {
-    func edit(prompt: String, mode: AIMode, aspect: String, durs: [Double], ref: UIImage?, cur: TimelineProject?, key: String) async throws -> TimelineProject {
+    func transcribe(url: URL) async -> [TextOverlay] {
+        let auth = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
+        guard auth == .authorized, let rec = SFSpeechRecognizer(), rec.isAvailable else { return [] }
+        let req = SFSpeechURLRecognitionRequest(url: url); req.shouldReportPartialResults = false
+        return await withCheckedContinuation { c in
+            rec.recognitionTask(with: req) { res, err in
+                guard let res = res, res.isFinal else { if err != nil { c.resume(returning: []) }; return }
+                var list: [TextOverlay] = [], words: [String] = [], start = 0.0
+                for s in res.bestTranscription.segments {
+                    if words.isEmpty { start = s.timestamp }
+                    words.append(s.substring)
+                    if words.count >= 3 {
+                        list.append(TextOverlay(text: words.joined(separator: " "), start_seconds: start, end_seconds: s.timestamp + s.duration, position: "bottom"))
+                        words.removeAll()
+                    }
+                }
+                if !words.isEmpty, let last = res.bestTranscription.segments.last {
+                    list.append(TextOverlay(text: words.joined(separator: " "), start_seconds: start, end_seconds: last.timestamp + last.duration, position: "bottom"))
+                }
+                c.resume(returning: list)
+            }
+        }
+    }
+    
+    func edit(prompt: String, mode: AIMode, aspect: String, durs: [Double], transcripts: [String], ref: UIImage?, cur: TimelineProject?, key: String) async throws -> TimelineProject {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let endpoint = "https://googleapis.com" + mode.model + ":generateContent?key=" + k
         var req = URLRequest(url: URL(string: endpoint)!)
         req.httpMethod = "POST"
         req.addValue("application/json", forHTTPHeaderField: "Content-Type")
         let curStr = (try? String(data: JSONEncoder().encode(cur), encoding: .utf8)) ?? "None"
-        let info = durs.enumerated().map { "Clip " + String($0.offset) + " (" + String(Int($0.element)) + "s)" }.joined(separator: ", ")
-        let sys = "You are Narrative AI video editor. Match reference images, create punchy rhythm cuts, and generate short bold captions. Target aspect ratio: " + aspect + ". Output ONLY valid JSON: {\"aspect_ratio\":\"" + aspect + "\",\"clips\":[{\"clip_index\":0,\"start_seconds\":0.0,\"end_seconds\":3.0,\"speed\":1.0,\"label\":\"Hook\"}],\"overlays\":[{\"text\":\"on\",\"start_seconds\":0.0,\"end_seconds\":3.0,\"position\":\"bottom\"}],\"auto_captions\":true,\"assistant_reply\":\"Cut synced with captions\"}\nClips: " + info + "\nCurrent: " + curStr + "\nRequest: " + prompt
+        let info = durs.enumerated().map { idx, d in
+            let sp = idx < transcripts.count && !transcripts[idx].isEmpty ? " | Spoken words: " + transcripts[idx] : ""
+            return "Clip " + String(idx) + " (" + String(Int(d)) + "s)" + sp
+        }.joined(separator: "\n")
+        let sys = "You are Narrative, an AI-first video editor. Cut the user's footage based on their prompt, spoken dialogue, and any reference image. Only create overlays from real spoken words or titles requested by the user. Target aspect ratio: " + aspect + ". Output ONLY valid JSON: {\"aspect_ratio\":\"" + aspect + "\",\"clips\":[{\"clip_index\":0,\"start_seconds\":0.0,\"end_seconds\":4.0,\"speed\":1.0,\"label\":\"Clip 1\"}],\"overlays\":[],\"auto_captions\":true,\"assistant_reply\":\"Summary of edits\"}\nFootage:\n" + info + "\nCurrent Timeline:\n" + curStr + "\nUser Request: " + prompt
         var parts: [[String: Any]] = [["text": sys]]
         if let d = ref?.jpegData(compressionQuality: 0.6) {
             parts.append(["inline_data": ["mime_type": "image/jpeg", "data": d.base64EncodedString()]])
@@ -118,6 +160,7 @@ struct ContentView: View {
     @State private var refImg: UIImage?
     @State private var urls: [URL] = []
     @State private var durs: [Double] = []
+    @State private var transcripts: [String] = []
     @State private var versions: [TimelineProject] = []
     @State private var idx = -1
     @State private var preview: URL?
@@ -185,7 +228,7 @@ struct ContentView: View {
                 
                 Spacer(minLength: 0)
                 
-                ZStack(alignment: .bottom) {
+                ZStack {
                     RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.07))
                     if preview != nil || !urls.isEmpty {
                         VideoPlayer(player: player).cornerRadius(12)
@@ -196,13 +239,6 @@ struct ContentView: View {
                                 Text("Bring your footage").font(.subheadline.bold()).foregroundColor(.white)
                             }
                         }
-                    }
-                    if idx >= 0 && idx < versions.count, let cap = versions[idx].overlays.first {
-                        Text(cap.text)
-                            .font(.system(size: 20, weight: .heavy))
-                            .foregroundColor(.white)
-                            .shadow(color: .black, radius: 4, x: 0, y: 2)
-                            .padding(.bottom, 16)
                     }
                 }.frame(height: canvasHeight).padding(.horizontal)
                 
@@ -237,26 +273,20 @@ struct ContentView: View {
                             }
                         }.padding(.horizontal, 12)
                         
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 4) {
-                                if idx >= 0 && idx < versions.count {
+                        if idx >= 0 && idx < versions.count && !versions[idx].overlays.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 4) {
                                     ForEach(versions[idx].overlays) { o in
                                         Text(o.text).font(.caption.bold()).foregroundColor(.white)
                                             .padding(.horizontal, 12).padding(.vertical, 8)
                                             .background(Color(red: 0.43, green: 0.34, blue: 0.96)).cornerRadius(8)
                                     }
-                                } else {
-                                    ForEach(["A plus...", "It's a l...", "on", "In his prime"], id: \.self) { label in
-                                        Text(label).font(.caption.bold()).foregroundColor(.white)
-                                            .padding(.horizontal, 12).padding(.vertical, 8)
-                                            .background(Color(red: 0.43, green: 0.34, blue: 0.96)).cornerRadius(8)
-                                    }
-                                }
-                            }.padding(.horizontal, 12)
+                                }.padding(.horizontal, 12)
+                            }
                         }
                         
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 3) {
+                            HStack(spacing: 4) {
                                 if idx >= 0 && idx < versions.count {
                                     ForEach(versions[idx].clips) { c in
                                         HStack(spacing: 6) {
@@ -266,37 +296,37 @@ struct ContentView: View {
                                         .padding(.horizontal, 12).padding(.vertical, 7)
                                         .background(Color(red: 0.45, green: 0.08, blue: 0.16)).cornerRadius(6)
                                     }
-                                } else {
-                                    ForEach(0..<4, id: \.self) { _ in
-                                        HStack(spacing: 28) {
-                                            Rectangle().fill(Color.clear).frame(width: 10, height: 24)
-                                            Rectangle().fill(Color.pink).frame(width: 3, height: 24)
-                                        }
-                                        .padding(.horizontal, 10).padding(.vertical, 6)
-                                        .background(Color(red: 0.45, green: 0.08, blue: 0.16)).cornerRadius(6)
+                                } else if !urls.isEmpty {
+                                    ForEach(urls.indices, id: \.self) { i in
+                                        Text("Clip " + String(i + 1) + " (" + String(Int(durs[i])) + "s)")
+                                            .font(.caption2.bold()).foregroundColor(.white)
+                                            .padding(.horizontal, 12).padding(.vertical, 8)
+                                            .background(Color(red: 0.45, green: 0.08, blue: 0.16)).cornerRadius(6)
                                     }
+                                } else {
+                                    RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)).frame(height: 32)
                                 }
                             }.padding(.horizontal, 12)
                         }
                     }
-                    Rectangle().fill(Color.white).frame(width: 2, height: 112)
+                    Rectangle().fill(Color.white).frame(width: 2, height: 95)
                 }
                 
                 HStack(spacing: 8) {
                     Button { showRefPicker = true } label: {
-Image(systemName: refImg == nil ? "photo.badge.plus" : "checkmark.circle.fill")
-.font(.title3).foregroundColor(Color(red: 0.43, green: 0.34, blue: 0.96))
-}
-TextField("Say what you want made...", text: $prompt)
-.font(.subheadline).padding(9).background(Color.white.opacity(0.1)).cornerRadius(18)
-Button { Task { await run() } } label: {
-if busy { ProgressView().tint(.white) }
-else { Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundColor(Color(red: 0.43, green: 0.34, blue: 0.96)) }
-}.disabled(urls.isEmpty || (prompt.isEmpty && refImg == nil) || busy)
-}.padding(.horizontal).padding(.bottom, 6)
-}
-}
-.photosPicker(isPresented: $showVideoPicker, selection: $items, maxSelectionCount: 8, matching: .videos, preferredItemEncoding: .compatible)
+                        Image(systemName: refImg == nil ? "photo.badge.plus" : "checkmark.circle.fill")
+                            .font(.title3).foregroundColor(Color(red: 0.43, green: 0.34, blue: 0.96))
+                    }
+                    TextField("Say what you want made...", text: $prompt)
+                        .font(.subheadline).padding(9).background(Color.white.opacity(0.1)).cornerRadius(18)
+                    Button { Task { await run() } } label: {
+                        if busy { ProgressView().tint(.white) }
+                        else { Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundColor(Color(red: 0.43, green: 0.34, blue: 0.96)) }
+                    }.disabled(urls.isEmpty || (prompt.isEmpty && refImg == nil) || busy)
+                }.padding(.horizontal).padding(.bottom, 6)
+            }
+        }
+photosPicker(isPresented: $showVideoPicker, selection: $items, maxSelectionCount: 8, matching: .videos, preferredItemEncoding: .compatible)
 .photosPicker(isPresented: $showRefPicker, selection: $refItem, matching: .images)
 .onChange(of: items) { _, list in Task { await load(list) } }
 .onChange(of: refItem) { _, it in Task { if let d = try? await it?.loadTransferable(type: Data.self) { refImg = UIImage(data: d) } } }
@@ -306,13 +336,14 @@ NavigationStack { Form { SecureField("Free Gemini API Key (AIza...)", text: $api
 }
 @MainActor func load(_ list: [PhotosPickerItem]) async {
 guard !list.isEmpty else { return }
-urls.removeAll(); durs.removeAll(); status = "Importing clips..."
-for (i, it) in list.enumerated() {
-if let data = try? await it.loadTransferable(type: Data.self) {
-let u = FileManager.default.temporaryDirectory.appendingPathComponent("clip_" + String(i) + "_" + UUID().uuidString + ".mp4")
-try? data.write(to: u)
+urls.removeAll(); durs.removeAll(); transcripts.removeAll(); status = "Importing clips..."
+for it in list {
+if let movie = try? await it.loadTransferable(type: MovieFile.self) {
+let u = movie.url
 let dur = (try? await AVURLAsset(url: u).load(.duration).seconds) ?? 5.0
-urls.append(u); durs.append(dur)
+let words = await engine.transcribe(url: u)
+let spoken = words.map { $0.text }.joined(separator: " ")
+urls.append(u); durs.append(dur); transcripts.append(spoken)
 }
 }
 items.removeAll()
@@ -328,7 +359,10 @@ preview = out; player = AVPlayer(url: out); player.play(); isPlaying = true
 guard !apiKey.isEmpty else { showKey = true; return }
 busy = true; let p = prompt.isEmpty ? "Match reference image style" : prompt; prompt = ""; status = "Cutting (" + mode.rawValue + ")..."
 do {
-let proj = try await engine.edit(prompt: p, mode: mode, aspect: aspect, durs: durs, ref: refImg, cur: idx >= 0 ? versions[idx] : nil, key: apiKey)
+var proj = try await engine.edit(prompt: p, mode: mode, aspect: aspect, durs: durs, transcripts: transcripts, ref: refImg, cur: idx >= 0 ? versions[idx] : nil, key: apiKey)
+if proj.auto_captions && proj.overlays.isEmpty, let first = urls.first {
+proj.overlays = await engine.transcribe(url: first)
+}
 versions.append(proj); idx = versions.count - 1; status = proj.assistant_reply ?? "Done!"
 await loadPreview(proj)
 } catch { status = "Error: " + error.localizedDescription }
